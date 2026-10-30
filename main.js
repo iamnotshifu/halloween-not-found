@@ -1,15 +1,19 @@
 /*
  * main.js — everything you see and hear on "404: HALLOWEEN NOT FOUND".
  *
- * Load order (see index.html):  three.js  →  quiz.js  →  main.js
+ * Load order (see index.html):  three.js  →  quiz.js  →  profile.js  →  main.js
  *
  * The page has four stages:
  *   1. A normal-looking 404 page.
- *   2. The page glitches and a terminal opens (the quiz lives there).
- *   3. The quiz picks a monster and a 3D graveyard appears (reveal()).
- *   4. The visitor can save or share a card.
+ *   2. The page glitches and a terminal opens. It "scans" the visitor and says
+ *      things it shouldn't know (city, time, device…), asks their name, then runs
+ *      the quiz.
+ *   3. The quiz picks a monster and a 3D graveyard appears (reveal()), with a
+ *      tombstone carrying the visitor's name.
+ *   4. The visitor can open "How did it know?", then save or share a card.
  *
- * Quiz logic (questions, scoring) is in quiz.js. This file only handles
+ * Quiz logic (questions, scoring) is in quiz.js. What the page "knows" about the
+ * visitor, and how it words it, is in profile.js. This file only handles
  * presentation.
  */
 (function () {
@@ -24,6 +28,8 @@
     glitchAfterMs: 4500,    // page starts glitching
     terminalAfterMs: 9000,  // terminal opens by itself
     typeSpeedMs: 14,        // delay between typed characters
+    lineGapMs: 750,         // pause after each thing it "knows", so each one lands
+    cardShowsCity: true,    // put "LAGOS · 11:47 PM" on the share card (set false to keep the city private)
     siteUrl: "halloween.iamnotshifu.com"  // printed on the share card
   };
 
@@ -50,6 +56,18 @@
 
   const run = Quiz.buildRun();                 // this visitor’s questions
   const totals = Quiz.emptyScores();           // running score per monster
+
+  // What the page learns about the visitor. Collected right away so it is ready
+  // when the terminal opens (profile.js never throws: a missing signal is null).
+  const factsReady = Profile.collect();
+  let visitorName = "";                        // typed in the terminal ("" = stranger)
+  let nameResolver = null;                     // set while the terminal waits for the name
+  let awayCount = 0;                           // times the visitor switched tabs
+  const answerMs = [];                         // how long each question took to answer
+  let shownAt = 0;                             // when the current question appeared
+  const spoken = [];                           // everything it “knew”, for the How panel: [{ text, how }]
+  let visitorCity = null;                      // used on the tombstone and the share card
+  let snapshotScene = null;                    // set by startScene(): draws the 3D view for the share card
 
   /* ================================================================== */
   /* Sound                                                               */
@@ -128,11 +146,13 @@
       options.appendChild(b);
     });
     log.scrollTop = log.scrollHeight;
+    shownAt = Date.now();
 
     return new Promise(function (resolve) {
       waiting = {
         count: step.options.length,
         answer: function (i) {
+          answerMs.push(Date.now() - shownAt);
           waiting = null;
           options.innerHTML = "";
           printNow("> " + step.options[i].text);
@@ -144,6 +164,24 @@
     });
   }
 
+  // Says one thing it "knows", then pauses so the visitor can feel it.
+  // `line` is { text, how } from profile.js. It is remembered for the How panel.
+  async function know(line) {
+    spoken.push({ text: line.text, how: line.how });
+    await say(line.text);
+    beep(140, 0.25, "square", 0.05);
+    await sleep(CONFIG.lineGapMs);
+  }
+
+  // Asks for the visitor's name and waits for them to type it.
+  function askName() {
+    return new Promise(function (resolve) {
+      nameResolver = resolve;
+      cmd.placeholder = "type your name…";
+      cmd.focus();
+    });
+  }
+
   async function openTerminal() {
     if (terminalOpen || revealed) return;
     terminalOpen = true;
@@ -152,20 +190,56 @@
     beep(110, 2, "sawtooth", 0.06);
 
     await say("SYSTEM: visitor detected.");
-    await say("you stayed too long. let’s find out what you are.");
+    await say("scanning…");
+    await sleep(1400);
+    if (revealed) return;
 
+    // 1. It knows things it shouldn't. (Stays quiet about anything the browser didn't share.)
+    const facts = await factsReady;
+    visitorCity = facts.city;
+    for (const line of Profile.dossier(facts)) {
+      await know(line);
+      if (revealed) return;
+    }
+
+    // 2. …but not the one thing it wants.
+    await say("that’s almost everything. one thing is missing.");
+    await sleep(500);
+    await say("what’s your name?");
+    const typed = await askName();
+    cmd.placeholder = "type a number…";
+    if (revealed) return;
+
+    visitorName = Profile.sanitizeName(typed);
+    if (visitorName) {
+      await say(visitorName.toLowerCase() + ". noted.");
+      spoken.push({ text: "you told it your name: " + visitorName, how: "You typed it. It’s the one thing in here that wasn’t already in your browser." });
+    } else {
+      await say("no name? fine. i’ll call you stranger.");
+    }
+    await sleep(700);
+    await say("now. let’s find out what you are.");
+
+    // 3. The quiz.
     for (const step of run) {
       await ask(step);
       if (revealed) return;
     }
 
+    // 4. It was watching while they answered.
     await say("analyzing… ");
     await sleep(900);
     if (revealed) return;
+    for (const line of Profile.behaviour({ awayCount: awayCount, answerMs: answerMs })) {
+      await know(line);
+      if (revealed) return;
+    }
 
     const monster = Quiz.pickWinner(totals);
     await say("result: " + Quiz.MONSTERS[monster].name.toUpperCase());
-    await sleep(1200);
+    await sleep(900);
+    await say("see you in the graveyard, " + Profile.displayName(visitorName).toLowerCase() + ".");
+    await sleep(1400);
     reveal(monster);
   }
 
@@ -184,8 +258,20 @@
 
   cmd.addEventListener("keydown", async function (e) {
     if (e.key !== "Enter" || revealed) return;
-    const input = cmd.value.trim().toLowerCase().replace(/\s+/g, " ");
+    const raw = cmd.value.trim();
+    const input = raw.toLowerCase().replace(/\s+/g, " ");
     cmd.value = "";
+
+    // While the terminal is waiting for a name, whatever is typed (even nothing)
+    // is the name. The secret command still works, so it is checked first.
+    if (nameResolver && !SECRET_COMMAND.test(input)) {
+      const resolve = nameResolver;
+      nameResolver = null;
+      printNow("> " + (Profile.sanitizeName(raw) || "…"));
+      resolve(raw);
+      return;
+    }
+
     if (!input) return;
 
     // A number answers the current question.
@@ -225,6 +311,7 @@
   // The tab title reacts when you switch away (only until the reveal).
   document.addEventListener("visibilitychange", function () {
     if (revealed) return;
+    if (document.hidden) awayCount++;   // counted, and quoted back to them after the quiz
     document.title = document.hidden ? "come back." : "…you came back.";
   });
 
@@ -248,6 +335,33 @@
   }
 
   /* ================================================================== */
+  /* "How did it know?" panel                                            */
+  /* ================================================================== */
+
+  // Lists everything it said, with where each thing really came from.
+  // Built with textContent, so nothing the visitor typed can inject markup.
+  function openHow() {
+    const list = $("#howlist");
+    list.innerHTML = "";
+    spoken.forEach(function (item) {
+      const row = document.createElement("div");
+      row.className = "fact";
+      const said = document.createElement("q");
+      said.textContent = item.text;
+      const how = document.createElement("span");
+      how.textContent = item.how;
+      row.appendChild(said);
+      row.appendChild(how);
+      list.appendChild(row);
+    });
+    $("#howpanel").classList.add("open");
+    $("#howclose").focus({ preventScroll: true });   // keep the panel scrolled to the top
+    $("#howpanel .sheet").scrollTop = 0;
+  }
+
+  function closeHow() { $("#howpanel").classList.remove("open"); }
+
+  /* ================================================================== */
   /* Stage 3: the reveal                                                 */
   /* ================================================================== */
 
@@ -255,6 +369,7 @@
     if (revealed) return;     // never run twice
     revealed = true;
     waiting = null;
+    if (nameResolver) { const release = nameResolver; nameResolver = null; release(""); }  // unblock the terminal
 
     const monster = Quiz.MONSTERS[key];
     const seconds = Math.round((Date.now() - startedAt) / 1000);
@@ -274,9 +389,23 @@
     $("#share").onclick = function () { makeCard(key, seconds, true); };
     $("#again").onclick = function () { location.reload(); };
 
+    // "How did it know?" panel. Hidden if it never said anything (secret found early).
+    $("#how").style.display = spoken.length ? "" : "none";
+    $("#how").onclick = openHow;
+    $("#howclose").onclick = closeHow;
+    $("#howpanel").addEventListener("click", function (e) { if (e.target === e.currentTarget) closeHow(); });
+    addEventListener("keydown", function (e) { if (e.key === "Escape") closeHow(); });
+
+    const tomb = {
+      name: Profile.displayName(visitorName),
+      epitaph: key === "pumpkin" ? "FOUND THE SECRET" : "STAYED TOO LONG",
+      place: CONFIG.cardShowsCity && visitorCity ? visitorCity.toUpperCase() : "",   // the tombstone appears on the card too
+      date: new Date().toLocaleDateString("en-US", { month: "short", day: "numeric", year: "numeric" })
+    };
+
     try {
       canvas.style.display = "block";
-      startScene(key);
+      startScene(key, tomb);
     } catch (err) {
       // No three.js (blocked CDN) or no WebGL: show the emoji instead of a black page.
       console.warn("3D scene unavailable:", err);
@@ -468,6 +597,70 @@
     return lamp;
   }
 
+  // Paints the engraving for the visitor's own tombstone onto a canvas.
+  function tombTexture(tomb) {
+    const c = document.createElement("canvas");
+    c.width = 512;
+    c.height = 640;
+    const x = c.getContext("2d");
+    x.fillStyle = "#9a9aa8";
+    x.fillRect(0, 0, 512, 640);
+    for (let i = 0; i < 700; i++) {          // speckle, so it reads as stone
+      x.fillStyle = Math.random() < 0.5 ? "rgba(0,0,0,.08)" : "rgba(255,255,255,.08)";
+      x.fillRect(Math.random() * 512, Math.random() * 640, 3, 3);
+    }
+    x.textAlign = "center";
+
+    // Each line is drawn twice (a light edge, then dark) so it looks carved in.
+    function carve(text, y, font, fitWidth) {
+      if (fitWidth) fitFont(x, text, fitWidth, 72, "700", "Georgia, serif", 20);
+      else x.font = font;
+      x.fillStyle = "rgba(255,255,255,.35)";
+      x.fillText(text, 256 + 2, y + 2);
+      x.fillStyle = "#14141b";
+      x.fillText(text, 256, y);
+    }
+    carve("HERE LIES", 150, "700 44px Georgia, serif");
+    carve(tomb.name, 270, null, 450);
+    carve(tomb.epitaph, 355, "700 32px Georgia, serif");
+    carve(tomb.date, 435, "30px Georgia, serif");
+    if (tomb.place) carve(tomb.place, 495, "28px Georgia, serif");
+    return new THREE.CanvasTexture(c);
+  }
+
+  // The visitor's own tombstone. It stays beside the monster, facing the camera
+  // (startScene moves it every frame), so the name is always readable and never
+  // blocks the monster. Lit by its own glow, because the graveyard is dark.
+  function buildTombstone(scene, tomb) {
+    const T = THREE;
+    const stone = new T.Group();
+    const w = 1.5, h = 1.7, d = 0.25;
+    const rock = { emissive: 0x5c5c6a };   // matches the glow of the engraved face
+
+    const body = new T.Mesh(new T.BoxGeometry(w, h, d), material(0x8a8a98, rock));
+    body.position.y = h / 2;
+    stone.add(body);
+
+    // rounded top: half a cylinder lying on its side
+    const arch = new T.Mesh(new T.CylinderGeometry(w / 2, w / 2, d, 24, 1, false, 0, Math.PI), material(0x8a8a98, rock));
+    arch.rotation.x = Math.PI / 2;
+    arch.rotation.y = Math.PI / 2;
+    arch.position.y = h;
+    stone.add(arch);
+
+    const map = tombTexture(tomb);
+    const face = new T.Mesh(new T.PlaneGeometry(w, h), new T.MeshStandardMaterial({
+      map: map, emissiveMap: map, emissive: 0xffffff, emissiveIntensity: 0.55, roughness: 0.9
+    }));
+    face.position.set(0, h / 2, d / 2 + 0.002);
+    stone.add(face);
+
+    stone.scale.setScalar(0.8);
+    stone.rotation.z = 0.04;           // slightly crooked, like the others
+    scene.add(stone);
+    return stone;
+  }
+
   // Seven see-through ghosts drifting in a ring around the graveyard.
   function buildWisps(scene) {
     const T = THREE;
@@ -524,7 +717,7 @@
 
   // Puts it all together and starts the animation loop.
   // Throws if three.js or WebGL is unavailable (reveal() catches that).
-  function startScene(key) {
+  function startScene(key, tomb) {
     if (typeof THREE === "undefined") throw new Error("three.js did not load");
     const T = THREE;
 
@@ -536,6 +729,7 @@
     const camera = new T.PerspectiveCamera(60, innerWidth / innerHeight, 0.1, 100);
 
     const lamp = buildGraveyard(scene);
+    const stone = buildTombstone(scene, tomb);
     const monster = buildMonster(key);
     scene.add(monster.group);
     const wisps = buildWisps(scene);
@@ -551,11 +745,25 @@
       angle -= (e.clientX - lastX) * 0.01;
       lastX = e.clientX;
     });
-    addEventListener("resize", function () {
-      camera.aspect = innerWidth / innerHeight;
+    // Fits the view to the screen. On a tall phone screen the camera backs away so
+    // the monster and tombstone fit side by side, and the picture slides up so it
+    // sits above the buttons instead of behind them.
+    let radius = 7;      // camera distance from the monster
+    let stoneSide = -2;  // how far left of the monster the tombstone stands
+    let stoneAhead = 2.4;      // and how far toward the camera
+    function layout() {
+      const w = innerWidth, h = innerHeight, aspect = w / h;
+      radius = 7 + (1 - Math.min(aspect, 1)) * 4.5;
+      stoneAhead = 2.4;
+      const visibleHalfWidth = (radius - stoneAhead) * Math.tan(camera.fov * Math.PI / 360) * aspect;
+      stoneSide = -Math.max(0.5, Math.min(2.4, visibleHalfWidth - 0.75));
+      camera.aspect = aspect;
+      camera.setViewOffset(w, h, 0, Math.round((hud.offsetHeight || 0) / 2), w, h);
       camera.updateProjectionMatrix();
-      renderer.setSize(innerWidth, innerHeight);
-    });
+      renderer.setSize(w, h);
+    }
+    layout();
+    addEventListener("resize", layout);
 
     const isGhost = key === "ghost";
 
@@ -608,11 +816,60 @@
 
       // camera orbit
       if (!dragging) angle += 0.0025;
-      camera.position.set(Math.sin(angle) * 7, 3, Math.cos(angle) * 7);
-      camera.lookAt(0, 1.6, 0);
+      placeCamera();
 
       renderer.render(scene, camera);
     }
+
+    // Puts the camera on its orbit, and the tombstone beside the monster, facing it.
+    // The tombstone keeps its place as the camera circles, so the name stays readable.
+    function placeCamera() {
+      camera.position.set(Math.sin(angle) * radius, 3, Math.cos(angle) * radius);
+      camera.lookAt(0, 1.6, 0);
+      stone.position.set(
+        stoneAhead * Math.sin(angle) + stoneSide * Math.cos(angle), 0,
+        stoneAhead * Math.cos(angle) - stoneSide * Math.sin(angle));
+      stone.rotation.y = angle;
+    }
+
+    // For the share card: draws the scene exactly as the visitor sees it right now
+    // (same monster, same tombstone, same camera angle), but in a landscape frame
+    // of width x height pixels. Returns a 2D canvas, or null if anything goes wrong.
+    snapshotScene = function (width, height) {
+      const ratio = renderer.getPixelRatio();
+      const keepAngle = angle;                   // where the visitor's camera was
+      const keepSpin = monster.group.rotation.y; // and how far the monster had turned
+      try {
+        angle = 0;                               // card shot is always from the front...
+        monster.group.rotation.y = 0;            // ...with the monster facing the lens
+        monster.eyes.forEach(function (eye) { eye.scale.y = 1; });   // and eyes open (no mid-blink)
+        renderer.setPixelRatio(1);
+        renderer.setSize(width, height, false);   // false: don't touch the on-screen canvas size
+        camera.aspect = width / height;
+        camera.clearViewOffset();
+        radius = 5.4;                             // closer than on screen, so the monster fills the card
+        stoneAhead = 1;                           // tombstone further from the lens, so its whole face fits
+        stoneSide = -1.9;
+        camera.updateProjectionMatrix();
+        placeCamera();
+        renderer.render(scene, camera);          // render and copy in the same moment, so the buffer is still full
+
+        const copy = document.createElement("canvas");
+        copy.width = width;
+        copy.height = height;
+        copy.getContext("2d").drawImage(canvas, 0, 0);
+        return copy;
+      } catch (err) {
+        console.warn("Could not capture the 3D scene for the card:", err);
+        return null;
+      } finally {
+        angle = keepAngle;
+        monster.group.rotation.y = keepSpin;
+        renderer.setPixelRatio(ratio);
+        layout();                                 // put the on-screen view back exactly as it was
+      }
+    };
+
     frame(0);
   }
 
@@ -636,10 +893,11 @@
 
   // Shrinks the font until `text` fits inside `maxWidth`.
   // (Needed for "THE PUMPKIN KING", which is wider than the other names.)
-  function fitFont(ctx, text, maxWidth, startPx, weight, family) {
+  function fitFont(ctx, text, maxWidth, startPx, weight, family, minPx) {
+    minPx = minPx || 40;
     let size = startPx;
     ctx.font = weight + " " + size + "px " + family;
-    while (size > 40 && ctx.measureText(text).width > maxWidth) {
+    while (size > minPx && ctx.measureText(text).width > maxWidth) {
       size -= 4;
       ctx.font = weight + " " + size + "px " + family;
     }
@@ -669,25 +927,48 @@
     ctx.font = "700 44px monospace";
     ctx.fillText("404: HALLOWEEN NOT FOUND", 540, 130);
 
-    // emoji
-    ctx.font = "280px 'Apple Color Emoji','Segoe UI Emoji','Noto Color Emoji',serif";
-    ctx.fillText(monster.emoji, 540, 560);
+    // picture: the real 3D scene (their monster beside their own tombstone).
+    // If WebGL isn't available there is no scene, so fall back to the emoji.
+    const PIC = { x: 100, y: 170, w: 880, h: 587 };      // 3:2 frame
+    const scene = snapshotScene ? snapshotScene(1320, 880) : null;
+    ctx.fillStyle = "#07070c";
+    ctx.fillRect(PIC.x, PIC.y, PIC.w, PIC.h);
+    if (scene) {
+      ctx.drawImage(scene, PIC.x, PIC.y, PIC.w, PIC.h);
+    } else {
+      ctx.fillStyle = "#ff7a1a";
+      ctx.font = "280px 'Apple Color Emoji','Segoe UI Emoji','Noto Color Emoji',serif";
+      ctx.fillText(monster.emoji, 540, PIC.y + 400);
+    }
+    ctx.strokeStyle = "#ff7a1a";
+    ctx.lineWidth = 3;
+    ctx.strokeRect(PIC.x, PIC.y, PIC.w, PIC.h);
 
     // name (shrinks to fit) and tagline
     ctx.fillStyle = "#fff";
-    fitFont(ctx, monster.name.toUpperCase(), 880, 96, "800", "sans-serif");
-    ctx.fillText(monster.name.toUpperCase(), 540, 760);
+    fitFont(ctx, monster.name.toUpperCase(), 880, 88, "800", "sans-serif");
+    ctx.fillText(monster.name.toUpperCase(), 540, 855);
     ctx.fillStyle = "#b9b9c8";
-    ctx.font = "40px sans-serif";
-    wrapText(ctx, monster.tagline, 540, 840, 820, 54);
+    ctx.font = "38px sans-serif";
+    wrapText(ctx, monster.tagline, 540, 918, 820, 50);
+
+    // the personal part: their name, and (optionally) where and when they died
+    ctx.fillStyle = "#ff7a1a";
+    fitFont(ctx, "HERE LIES " + Profile.displayName(visitorName), 880, 44, "700", "monospace");
+    ctx.fillText("HERE LIES " + Profile.displayName(visitorName), 540, 1062);
+    const where = [CONFIG.cardShowsCity && visitorCity ? visitorCity.toUpperCase() : "", Profile.clock(new Date())]
+      .filter(Boolean).join(" · ");
+    ctx.fillStyle = "#888";
+    ctx.font = "30px monospace";
+    ctx.fillText(where, 540, 1110);
 
     // score and address
     ctx.fillStyle = "#39ff88";
     ctx.font = "700 46px monospace";
-    ctx.fillText("I SURVIVED " + seconds + (seconds === 1 ? " SECOND" : " SECONDS"), 540, 1100);
+    ctx.fillText("I SURVIVED " + seconds + (seconds === 1 ? " SECOND" : " SECONDS"), 540, 1198);
     ctx.fillStyle = "#888";
     ctx.font = "34px monospace";
-    ctx.fillText(CONFIG.siteUrl, 540, 1230);
+    ctx.fillText(CONFIG.siteUrl, 540, 1268);
 
     c.toBlob(async function (blob) {
       if (!blob) return;

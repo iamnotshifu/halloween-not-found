@@ -1,8 +1,7 @@
 :root{color-scheme:dark;--bg:#0b0b0f;--fg:#d8d8e0;--o:#ff7a1a;--g:#39ff88;padding-top:env(safe-area-inset-top,0px);padding-bottom:env(safe-area-inset-bottom,0px)}
 *{box-sizing:border-box}
 html,body{height:100%;margin:0;background:var(--bg);color:var(--fg);font-family:system-ui,-apple-system,"Segoe UI",sans-serif;overflow:hidden}
-/* Brief flash while glitching. Softer than a full invert; JS skips it for reduced-motion users. */
-body.flick{filter:brightness(1.8)}
+body.flick{filter:invert(1)}
 #p404{height:100%;display:flex;flex-direction:column;align-items:center;justify-content:center;text-align:center;padding:24px}
 #p404 h1{font-size:clamp(90px,28vw,220px);margin:0;font-weight:800;letter-spacing:-.04em;line-height:1}
 #p404 h2{margin:0 0 8px;font-weight:600}
@@ -12,13 +11,10 @@ button{font:inherit;cursor:pointer}
 body.glitch h1{animation:gl .5s infinite steps(2);color:var(--o)}
 body.glitch #sub{color:#ff4d4d}
 @keyframes gl{0%{text-shadow:4px 0 #0ff,-4px 0 #f0f;transform:skew(0)}50%{text-shadow:-6px 2px #0ff,6px -2px #f0f;transform:skew(6deg) translateX(8px)}100%{text-shadow:2px 0 #0ff,-2px 0 #f0f;transform:skew(-4deg)}}
-/* People who ask their device for less motion get a static glitch. */
-@media (prefers-reduced-motion:reduce){body.glitch h1{animation:none;text-shadow:4px 0 #0ff,-4px 0 #f0f}}
-/* Taller than before: the quiz now has five answers per question. */
-#term{position:fixed;left:0;right:0;bottom:0;height:68%;background:rgba(0,0,0,.94);border-top:1px solid var(--g);color:var(--g);font:15px/1.5 ui-monospace,Menlo,Consolas,monospace;padding:16px 16px calc(16px + env(safe-area-inset-bottom,0px));display:none;flex-direction:column}
-#log{flex:1;overflow:auto;min-height:3em}
+#term{position:fixed;left:0;right:0;bottom:0;height:62%;background:rgba(0,0,0,.94);border-top:1px solid var(--g);color:var(--g);font:15px/1.5 ui-monospace,Menlo,Consolas,monospace;padding:16px 16px calc(16px + env(safe-area-inset-bottom,0px));display:none;flex-direction:column}
+#log{flex:1;overflow:auto}
 #log div{margin:2px 0}
-.opt{display:block;width:100%;text-align:left;background:none;border:1px solid #1d7a45;color:var(--g);border-radius:6px;padding:8px 12px;margin:4px 0;font:inherit}
+.opt{display:block;width:100%;text-align:left;background:none;border:1px solid #1d7a45;color:var(--g);border-radius:6px;padding:10px 12px;margin:6px 0;font:inherit}
 .opt:hover,.opt:active{background:#0e2b1b}
 #in{display:flex;gap:8px;margin-top:8px}
 #in span{color:var(--o)}
@@ -31,3 +27,13 @@ body.glitch #sub{color:#ff4d4d}
 #btns{display:flex;gap:10px;flex-wrap:wrap;justify-content:center;margin-top:10px}
 #btns button{background:var(--o);color:#190a00;border:0;border-radius:8px;padding:11px 18px;font-weight:700}
 #btns button.alt{background:#2a2a35;color:#fff}
+#howpanel{position:fixed;inset:0;display:none;align-items:center;justify-content:center;padding:16px;background:rgba(0,0,0,.82);z-index:10}
+#howpanel.open{display:flex}
+#howpanel .sheet{width:100%;max-width:520px;max-height:100%;overflow:auto;background:#0e0e14;border:1px solid var(--o);border-radius:12px;padding:20px 20px calc(20px + env(safe-area-inset-bottom,0px))}
+#howpanel h2{margin:0 0 6px;color:var(--o)}
+#howpanel .lede{margin:0 0 14px;color:#9a9aa8}
+.fact{border-top:1px solid #23232e;padding:10px 0}
+.fact q{display:block;quotes:none;color:var(--g);font:15px/1.45 ui-monospace,Menlo,Consolas,monospace}
+.fact span{display:block;margin-top:4px;color:#c9c9d6;font-size:14px;line-height:1.45}
+#howpanel .fine{border-top:1px solid #23232e;padding-top:12px;color:#8a8a98;font-size:13px;line-height:1.5}
+#howclose{background:var(--o);color:#190a00;border:0;border-radius:8px;padding:11px 18px;font-weight:700;width:100%}
